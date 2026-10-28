@@ -566,7 +566,9 @@ func tgUpdateForOutboxEventForViewer(event domain.UpdateEvent, viewerUserID int6
 		if event.Message.Deleted {
 			return tgDeletedPrivateMessageOutboxUpdate(event)
 		}
-		return tgPrivateMessageUpdates(event, event.Message, 0, false, tgUsersForViewer(viewerUserID, event.Users), tgChannels(viewerUserID, event.Channels))
+		users := tgUsersForViewer(viewerUserID, event.Users)
+		users = appendPrivateAgentUsersForMessages(users, []domain.Message{event.Message})
+		return tgPrivateMessageUpdates(event, event.Message, 0, false, users, tgChannels(viewerUserID, event.Channels))
 	case domain.UpdateEventReadHistoryInbox, domain.UpdateEventReadHistoryOutbox:
 		var update tg.UpdateClass
 		if event.Type == domain.UpdateEventReadHistoryOutbox {

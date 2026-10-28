@@ -193,6 +193,40 @@ func TestRouterBuildOutboxUpdatesRejectsIncompleteSparseProjection(t *testing.T)
 	}
 }
 
+func TestRouterBuildOutboxUpdatesProjectsAgentPeerAsUserEmpty(t *testing.T) {
+	const (
+		viewerUserID = int64(1000000012)
+		agentPeerID  = domain.AgentCompatibilityPeerIDMin
+	)
+	users := &countingOutboxUsersService{users: map[int64]domain.User{}}
+	router := New(Config{}, Deps{Users: users}, zaptest.NewLogger(t), clock.System)
+	updates, err := router.BuildOutboxUpdates(context.Background(), []OutboxUpdateRequest{{
+		TargetUserID: viewerUserID,
+		Event: domain.UpdateEvent{
+			UserID: viewerUserID, Type: domain.UpdateEventNewMessage, Pts: 8, PtsCount: 1,
+			Message: domain.Message{
+				ID: 23, OwnerUserID: viewerUserID, Date: 1700000200, Body: "Agent · completed",
+				Peer: domain.Peer{Type: domain.PeerTypeUser, ID: agentPeerID},
+				From: domain.Peer{Type: domain.PeerTypeUser, ID: agentPeerID},
+			},
+			Users: []domain.User{{ID: agentPeerID, AccessHash: 9, FirstName: "must not be projected"}},
+		},
+	}})
+	if err != nil || len(updates) != 1 || updates[0] == nil {
+		t.Fatalf("BuildOutboxUpdates = %+v, %v; want one Agent update", updates, err)
+	}
+	if users.sparseCalls != 0 || len(users.calls) != 0 {
+		t.Fatalf("user resolver calls = sparse %d scalar %+v, want reserved Agent ID omitted", users.sparseCalls, users.calls)
+	}
+	if len(updates[0].Users) != 1 {
+		t.Fatalf("updates Users = %#v, want one UserEmpty", updates[0].Users)
+	}
+	empty, ok := updates[0].Users[0].(*tg.UserEmpty)
+	if !ok || empty.ID != agentPeerID {
+		t.Fatalf("updates Users = %#v, want UserEmpty(%d)", updates[0].Users, agentPeerID)
+	}
+}
+
 func TestRouterBuildOutboxUpdatesAllowsOnlyExplicitNoopToStayEmpty(t *testing.T) {
 	router := New(Config{}, Deps{}, zaptest.NewLogger(t), clock.System)
 	updates, err := router.BuildOutboxUpdates(context.Background(), []OutboxUpdateRequest{{

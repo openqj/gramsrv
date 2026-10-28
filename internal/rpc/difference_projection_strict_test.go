@@ -146,6 +146,47 @@ func TestUpdatesGetDifferenceStrictProjectionChunksAndSplitsCapacity(t *testing.
 	}
 }
 
+func TestUpdatesGetDifferenceProjectsAgentCompatibilityPeerAsUserEmpty(t *testing.T) {
+	const (
+		viewerID = int64(1_900_000_001)
+		peerID   = domain.AgentCompatibilityPeerIDMin + 1
+	)
+	users := &strictDifferenceUsers{mapUsersService: mapUsersService{users: map[int64]domain.User{}}}
+	updates := &captureUpdates{state: domain.UpdateState{Pts: 1, Date: 1700000000}}
+	updates.difference = &domain.UpdateDifference{
+		State: updates.state,
+		Events: []domain.UpdateEvent{{
+			Type: domain.UpdateEventNewMessage, UserID: viewerID, Pts: 1, PtsCount: 1,
+			Message: domain.Message{
+				ID: 17, OwnerUserID: viewerID, Date: 1700000000, Body: "Agent · running",
+				Peer: domain.Peer{Type: domain.PeerTypeUser, ID: peerID},
+				From: domain.Peer{Type: domain.PeerTypeUser, ID: peerID},
+			},
+			Users: []domain.User{{ID: peerID, AccessHash: 99, FirstName: "must not become a User"}},
+		}},
+	}
+	r := New(Config{}, Deps{Users: users, Updates: updates}, zaptest.NewLogger(t), clock.System)
+
+	result, err := r.onUpdatesGetDifference(WithUserID(context.Background(), viewerID), &tg.UpdatesGetDifferenceRequest{})
+	if err != nil {
+		t.Fatalf("updates.getDifference: %v", err)
+	}
+	difference, ok := result.(*tg.UpdatesDifference)
+	if !ok || len(difference.NewMessages) != 1 {
+		t.Fatalf("difference = %T %+v, want one Agent message", result, result)
+	}
+	if len(users.calls) != 0 {
+		t.Fatalf("strict User resolver calls = %v, want Agent compatibility ID omitted", users.calls)
+	}
+	if len(difference.Users) != 1 {
+		t.Fatalf("difference Users = %#v, want one UserEmpty(%d)", difference.Users, peerID)
+	}
+	empty, emptyOK := difference.Users[0].(*tg.UserEmpty)
+	if !emptyOK || empty.ID != peerID {
+		t.Fatalf("difference Users = %#v, want UserEmpty(%d)", difference.Users, peerID)
+	}
+}
+
 func TestUpdatesGetChannelDifferenceStrictProjectionChunksAndSplitsCapacity(t *testing.T) {
 	ctx := context.Background()
 	const viewerID = int64(1_900_000_001)

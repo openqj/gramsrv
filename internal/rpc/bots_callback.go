@@ -68,17 +68,16 @@ func (r *Router) onMessagesGetBotCallbackAnswer(ctx context.Context, req *tg.Mes
 	// 已由 resolveBotCallbackQuery 校验过（消息在请求者自己的盒里、对端正是该 bot、data
 	// 确实出现在该消息的 inline keyboard 中），此处只是把答案交给拥有该 bot 的实现。
 	// 不注册 query id：外部 setBotCallbackAnswer 因此无法伪造/覆盖内置 bot 的应答。
-	if r.deps.ServiceBotCallbacks != nil && r.deps.ServiceBotCallbacks.HandlesBot(botUserID) {
+	if r.deps.ServiceBotCallbacks != nil {
 		ans, handled, err := r.deps.ServiceBotCallbacks.OnCallbackQuery(ctx, callback)
 		if err != nil {
 			r.log.Warn("service bot callback query",
 				zap.Int64("bot_user_id", botUserID), zap.Int64("user_id", userID), zap.Error(err))
 			return nil, internalErr()
 		}
-		if !handled {
-			return nil, dataInvalidErr()
+		if handled {
+			return tgBotCallbackAnswer(ans), nil
 		}
-		return tgBotCallbackAnswer(ans), nil
 	}
 
 	queryID, pending, err := r.callbacks.registerContext(ctx, r.clock.Now(), botUserID, userID, botCallbackTimeout)

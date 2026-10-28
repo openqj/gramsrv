@@ -135,7 +135,7 @@ type GatewayWebhookControl interface {
 	ConfirmBotAPIWebhookDelivery(ctx context.Context, botID, updateID int64) error
 }
 
-func Start(ctx context.Context, addr string, bots BotsService, users UsersService, webapps WebAppService, invoices InvoiceService, gateway GatewayService, logger *zap.Logger) (*http.Server, error) {
+func Start(ctx context.Context, addr string, bots BotsService, users UsersService, webapps WebAppService, invoices InvoiceService, gateway GatewayService, logger *zap.Logger, opts ...StartOption) (*http.Server, error) {
 	if strings.TrimSpace(addr) == "" {
 		return nil, nil
 	}
@@ -143,6 +143,11 @@ func Start(ctx context.Context, addr string, bots BotsService, users UsersServic
 		logger = zap.NewNop()
 	}
 	handler := &handler{bots: bots, users: users, webapps: webapps, invoices: invoices, gateway: gateway, logger: logger, webhookClient: newWebhookHTTPClient()}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(handler)
+		}
+	}
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           handler.routes(),
@@ -173,14 +178,21 @@ func Start(ctx context.Context, addr string, bots BotsService, users UsersServic
 }
 
 type handler struct {
-	invoices      InvoiceService
-	bots          BotsService
-	users         UsersService
-	webapps       WebAppService
-	gateway       GatewayService
-	logger        *zap.Logger
-	polls         botAPIPollRegistry
-	webhookClient *http.Client
+	invoices            InvoiceService
+	bots                BotsService
+	users               UsersService
+	webapps             WebAppService
+	gateway             GatewayService
+	logger              *zap.Logger
+	polls               botAPIPollRegistry
+	webhookClient       *http.Client
+	agentGatewayHandler http.Handler
+}
+
+type StartOption func(*handler)
+
+func WithAgentGatewayHandler(agentHandler http.Handler) StartOption {
+	return func(h *handler) { h.agentGatewayHandler = agentHandler }
 }
 
 type botAPIPollRegistry struct {
@@ -222,6 +234,9 @@ type uploadedFile struct {
 
 func (h *handler) routes() http.Handler {
 	mux := http.NewServeMux()
+	if h.agentGatewayHandler != nil {
+		mux.Handle("/internal/agent/v1/", h.agentGatewayHandler)
+	}
 	mux.HandleFunc("/", h.handle)
 	return mux
 }

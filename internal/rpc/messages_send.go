@@ -30,6 +30,14 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 		sendErr = scheduleDateInvalidErr()
 		return nil, sendErr
 	}
+	privateAgentPeer := false
+	if peer, ok := req.Peer.(*tg.InputPeerUser); ok && peer != nil {
+		privateAgentPeer = domain.IsAgentCompatibilityPeerID(peer.UserID)
+	}
+	if privateAgentPeer && req.QuickReplyShortcut != nil {
+		sendErr = mediaInvalidErr()
+		return nil, sendErr
+	}
 	if req.QuickReplyShortcut != nil {
 		if utf8.RuneCountInString(req.Message) > maxSendMessageTextLength {
 			sendErr = messageTooLongErr()
@@ -53,6 +61,10 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 	}
 
 	if utf8.RuneCountInString(req.Message) > maxSendMessageTextLength {
+		if privateAgentPeer {
+			sendErr = messageTooLongErr()
+			return nil, sendErr
+		}
 		var updates tg.UpdatesClass
 		updates, duplicate, sendErr = r.sendSplitMessage(ctx, req)
 		return updates, sendErr
@@ -361,6 +373,9 @@ func (r *Router) sendSingleSendMessage(ctx context.Context, req *tg.MessagesSend
 	entities := req.Entities
 	if req.RichMessage == nil {
 		entities = r.augmentAutoEntities(req.Message, entities)
+	}
+	if domain.IsAgentCompatibilityPeerID(peer.ID) {
+		return r.sendPrivateAgentMessage(ctx, userID, peer, req, entities, idempotencyFingerprint)
 	}
 	suggestedInput, hasSuggestedPost := req.GetSuggestedPost()
 	// monoforum 普通用户发送不带 reply_to，saved_peer 必须由服务端推导为自己；管理员回复才必须
@@ -855,7 +870,7 @@ func mentionScanBlockedSpansFromTGEntities(message string, entities []tg.Message
 	var out []byteSpan
 	for _, entity := range entities {
 		switch entity.(type) {
-		case *tg.MessageEntityURL, *tg.MessageEntityTextURL:
+		case *tg.MessageEntityURL, *tg.MessageEntityTextURL, *tg.MessageEntityCode, *tg.MessageEntityPre:
 		default:
 			continue
 		}
@@ -873,7 +888,8 @@ func mentionScanBlockedSpansFromDomainEntities(message string, entities []domain
 	bounds := utf16ByteBoundaries(message)
 	var out []byteSpan
 	for _, entity := range entities {
-		if entity.Type != domain.MessageEntityURL && entity.Type != domain.MessageEntityTextURL {
+		if entity.Type != domain.MessageEntityURL && entity.Type != domain.MessageEntityTextURL &&
+			entity.Type != domain.MessageEntityCode && entity.Type != domain.MessageEntityPre {
 			continue
 		}
 		if span, ok := byteSpanFromUTF16Bounds(bounds, entity.Offset, entity.Length); ok {

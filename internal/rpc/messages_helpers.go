@@ -582,6 +582,20 @@ func (r *Router) checkedDomainPeerFromInputPeer(ctx context.Context, userID int6
 	if !ok || out.ID == 0 {
 		return domain.Peer{}, peerIDInvalidErr()
 	}
+	if out.Type == domain.PeerTypeUser && domain.IsAgentCompatibilityPeerID(out.ID) {
+		input, ok := peer.(*tg.InputPeerUser)
+		if !ok || input.AccessHash != 0 || r.deps.PrivateAgents == nil {
+			return domain.Peer{}, peerIDInvalidErr()
+		}
+		_, found, err := r.deps.PrivateAgents.ResolveConversation(ctx, userID, out.ID)
+		if err != nil {
+			return domain.Peer{}, internalErr()
+		}
+		if !found {
+			return domain.Peer{}, peerIDInvalidErr()
+		}
+		return out, nil
+	}
 	if out.Type == domain.PeerTypeChannel {
 		if err := r.validateInputPeerChannelAccess(ctx, userID, peer, out.ID); err != nil {
 			return domain.Peer{}, err

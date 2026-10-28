@@ -470,6 +470,7 @@ SELECT
 FROM dialogs d
 LEFT JOIN contacts c ON d.peer_type = 'user' AND c.user_id = d.user_id AND c.contact_user_id = d.peer_id
 WHERE d.user_id = $1
+  AND NOT (d.peer_type = 'user' AND d.peer_id BETWEEN 4000000000000 AND 4000009999999)
   AND (
     (NOT $2::boolean AND d.folder_id = 0)
     OR (
@@ -1098,6 +1099,7 @@ WITH base AS (
   LEFT JOIN contacts c ON d.peer_type = 'user' AND c.user_id = d.user_id AND c.contact_user_id = d.peer_id
   LEFT JOIN message_boxes m ON m.owner_user_id = d.user_id AND m.box_id = d.top_message_id AND NOT m.deleted
   WHERE d.user_id = $1
+    AND NOT (d.peer_type = 'user' AND d.peer_id BETWEEN 4000000000000 AND 4000009999999)
     AND (
       -- 不带 folder_id flag 视为主列表（folder 0）：官方语义下归档对话只以
       -- dialogFolder 聚合条目出现在主列表，DrKLO Android 主列表请求不设 flag。

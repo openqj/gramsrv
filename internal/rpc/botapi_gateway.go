@@ -270,8 +270,18 @@ func (r *Router) ConfirmBotAPIWebhookDelivery(ctx context.Context, botID, update
 // or channel message state machine. Positive chat_id is a user private chat;
 // -1000000000000-channel_id is a supergroup/channel chat.
 func (r *Router) BotAPISendMessage(ctx context.Context, botID, chatID int64, text string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, disableWebPagePreview, silent bool, replyToMessageID int) (domain.Message, error) {
+	return r.BotAPISendMessageWithRandomID(ctx, botID, chatID, randomNonZeroInt64(), text, entities, replyMarkup, disableWebPagePreview, silent, replyToMessageID)
+}
+
+// BotAPISendMessageWithRandomID is the same durable Bot send path with a
+// caller-supplied replay key. Internal service adapters use it to reconcile a
+// delivery whose message committed before its receipt did.
+func (r *Router) BotAPISendMessageWithRandomID(ctx context.Context, botID, chatID, randomID int64, text string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, disableWebPagePreview, silent bool, replyToMessageID int) (domain.Message, error) {
 	if r == nil || botID == 0 {
 		return domain.Message{}, errors.New("BOT_INVALID")
+	}
+	if randomID == 0 {
+		return domain.Message{}, errors.New("RANDOM_ID_INVALID")
 	}
 	peer, ok := botAPIPeerFromChatID(chatID)
 	if !ok {
@@ -311,7 +321,7 @@ func (r *Router) BotAPISendMessage(ctx context.Context, botID, chatID int64, tex
 	res, err := r.deps.Messages.SendPrivateText(ctx, botID, domain.SendPrivateTextRequest{
 		SenderUserID:    botID,
 		RecipientUserID: peer.ID,
-		RandomID:        randomNonZeroInt64(),
+		RandomID:        randomID,
 		Message:         text,
 		Entities:        append([]domain.MessageEntity(nil), entities...),
 		Silent:          silent,

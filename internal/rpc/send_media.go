@@ -168,28 +168,44 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 	// outbox 的排除键定位的是发起 RPC 的物理连接；PFS temp key 绑定后
 	// AuthKeyIDFrom 是业务视角 perm key，不能用它代替连接实际 raw key。
 	authKeyID := rawAuthKeyIDForOrigin(ctx)
+	var agentGatewayBotOwnerUserID int64
+	var agentGatewayBotUsername string
+	if r.deps.Bots != nil {
+		if profile, found, profileErr := r.deps.Bots.BotInfo(ctx, peer.ID); profileErr == nil &&
+			found && profile.OwnerUserID == userID {
+			agentGatewayBotOwnerUserID = profile.OwnerUserID
+			for _, projected := range projectedUsers {
+				if projected.ID == peer.ID {
+					agentGatewayBotUsername = projected.Username
+					break
+				}
+			}
+		}
+	}
 	res, err := r.deps.Messages.SendPrivateText(ctx, userID, domain.SendPrivateTextRequest{
-		SenderUserID:           userID,
-		RecipientUserID:        peer.ID,
-		RandomID:               p.randomID,
-		Message:                p.message,
-		Entities:               domainMessageEntitiesForViewer(userID, p.entities),
-		Media:                  p.media,
-		Silent:                 p.silent,
-		NoForwards:             p.noforwards,
-		ReplyTo:                replyTo,
-		Date:                   int(r.clock.Now().Unix()),
-		OriginAuthKeyID:        authKeyID,
-		OriginSessionID:        sessionID,
-		OriginClientSession:    clientSessionMetadataFromContext(ctx),
-		RecipientBlocked:       recipientBlocked,
-		IdempotencyFingerprint: p.idempotencyFingerprint,
-		IdempotencyPreflighted: p.idempotencyPreflighted,
-		ReplyMarkup:            p.replyMarkup,
-		RichMessage:            p.richMessage,
-		ViaBotID:               p.viaBotID,
-		GroupedID:              p.groupedID,
-		Effect:                 p.effect,
+		SenderUserID:               userID,
+		RecipientUserID:            peer.ID,
+		AgentGatewayBotOwnerUserID: agentGatewayBotOwnerUserID,
+		AgentGatewayBotUsername:    agentGatewayBotUsername,
+		RandomID:                   p.randomID,
+		Message:                    p.message,
+		Entities:                   domainMessageEntitiesForViewer(userID, p.entities),
+		Media:                      p.media,
+		Silent:                     p.silent,
+		NoForwards:                 p.noforwards,
+		ReplyTo:                    replyTo,
+		Date:                       int(r.clock.Now().Unix()),
+		OriginAuthKeyID:            authKeyID,
+		OriginSessionID:            sessionID,
+		OriginClientSession:        clientSessionMetadataFromContext(ctx),
+		RecipientBlocked:           recipientBlocked,
+		IdempotencyFingerprint:     p.idempotencyFingerprint,
+		IdempotencyPreflighted:     p.idempotencyPreflighted,
+		ReplyMarkup:                p.replyMarkup,
+		RichMessage:                p.richMessage,
+		ViaBotID:                   p.viaBotID,
+		GroupedID:                  p.groupedID,
+		Effect:                     p.effect,
 	})
 	if err != nil {
 		fields := append(r.contextLogFields(ctx),

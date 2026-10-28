@@ -93,11 +93,17 @@ func (c *viewerPeerCache) usersForIDs(ctx context.Context, viewerUserID int64, i
 // advancing an account/channel difference cursor or dispatching an outbox row.
 func (c *viewerPeerCache) usersForIDsStrict(ctx context.Context, viewerUserID int64, ids []int64) ([]domain.User, error) {
 	unique := uniquePeerIDs(ids)
-	users, err := c.resolveUsersForIDs(ctx, viewerUserID, unique)
+	profileIDs := make([]int64, 0, len(unique))
+	for _, id := range unique {
+		if !domain.IsAgentCompatibilityPeerID(id) {
+			profileIDs = append(profileIDs, id)
+		}
+	}
+	users, err := c.resolveUsersForIDs(ctx, viewerUserID, profileIDs)
 	if err != nil {
 		return nil, fmt.Errorf("resolve durable users for viewer %d: %w", viewerUserID, err)
 	}
-	if missingID, missing := missingProjectedUserID(unique, users); missing {
+	if missingID, missing := missingProjectedUserID(profileIDs, users); missing {
 		return nil, fmt.Errorf("%w: viewer_user_id=%d missing_user_id=%d", ErrDurableUserProjectionIncomplete, viewerUserID, missingID)
 	}
 	return users, nil

@@ -86,7 +86,6 @@ func TestBotManagementRPCFlow(t *testing.T) {
 	}
 	router := rpc.New(rpc.Config{DC: dc, IP: tcpAddr.IP.String(), Port: tcpAddr.Port}, deps, zaptest.NewLogger(t), clock.System)
 	botsService.SetRouterHooks(router)
-	botsService.SetTextDraftPusher(router)
 	srv := New(Options{Logger: zaptest.NewLogger(t), DC: dc, RSAKey: rsaKey, AuthKeys: authKeyStore, LayerRPC: router, ActiveSessions: activeSessions})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -322,7 +321,6 @@ func TestBotFatherCreateAndBotLoginFlow(t *testing.T) {
 	}
 	router := rpc.New(rpc.Config{DC: dc, IP: tcpAddr.IP.String(), Port: tcpAddr.Port}, deps, zaptest.NewLogger(t), clock.System)
 	botsService.SetRouterHooks(router)
-	botsService.SetTextDraftPusher(router)
 	srv := New(Options{Logger: zaptest.NewLogger(t), DC: dc, RSAKey: rsaKey, AuthKeys: authKeyStore, LayerRPC: router, ActiveSessions: activeSessions})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

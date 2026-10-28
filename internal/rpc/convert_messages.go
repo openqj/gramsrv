@@ -16,6 +16,7 @@ func tgMessagesMessages(viewerUserID int64, list domain.MessageList) tg.Messages
 		}
 	}
 	users := tgUsersForViewer(viewerUserID, list.Users)
+	users = appendPrivateAgentUsersForMessages(users, list.Messages)
 	if list.Count > len(messages) {
 		return &tg.MessagesMessagesSlice{
 			Count:    list.Count,
@@ -27,6 +28,39 @@ func tgMessagesMessages(viewerUserID int64, list domain.MessageList) tg.Messages
 		Messages: messages,
 		Users:    users,
 	}
+}
+
+func appendPrivateAgentUsersForMessages(users []tg.UserClass, messages []domain.Message) []tg.UserClass {
+	ids := make([]int64, 0)
+	for _, message := range messages {
+		if domain.IsAgentCompatibilityPeerID(message.Peer.ID) {
+			ids = append(ids, message.Peer.ID)
+		}
+	}
+	return appendPrivateAgentUserEmpty(users, ids...)
+}
+
+func appendPrivateAgentUserEmpty(users []tg.UserClass, peerIDs ...int64) []tg.UserClass {
+	seen := make(map[int64]struct{}, len(users)+len(peerIDs))
+	for _, user := range users {
+		switch value := user.(type) {
+		case *tg.User:
+			seen[value.ID] = struct{}{}
+		case *tg.UserEmpty:
+			seen[value.ID] = struct{}{}
+		}
+	}
+	for _, id := range peerIDs {
+		if !domain.IsAgentCompatibilityPeerID(id) {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		users = append(users, &tg.UserEmpty{ID: id})
+	}
+	return users
 }
 
 func tgMessage(m domain.Message) tg.MessageClass {

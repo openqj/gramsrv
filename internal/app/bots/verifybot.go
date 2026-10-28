@@ -348,11 +348,27 @@ func (s *Service) handleVerifyCommand(ctx context.Context, userID int64, cmd str
 // updateBotCallbackQuery, because an internal bot has no MTProto session and no
 // Bot API queue: the ordinary path could only ever end in BOT_RESPONSE_TIMEOUT.
 func (s *Service) OnCallbackQuery(ctx context.Context, query domain.BotCallbackQuery) (domain.BotCallbackAnswer, bool, error) {
-	if s == nil || s.bots == nil || !s.HandlesBot(query.BotUserID) {
+	if s == nil || s.bots == nil {
 		return domain.BotCallbackAnswer{}, false, nil
 	}
 	if query.UserID <= 0 || query.UserID == query.BotUserID {
 		return domain.BotCallbackAnswer{}, false, nil
+	}
+	if !s.HandlesBot(query.BotUserID) {
+		profile, found, err := s.bots.GetBot(ctx, query.BotUserID)
+		if err != nil {
+			return domain.BotCallbackAnswer{}, true, err
+		}
+		if !found || profile.BotUserID != query.BotUserID || profile.OwnerUserID <= 0 || s.agentCallbacks == nil {
+			return domain.BotCallbackAnswer{}, false, nil
+		}
+		return s.agentCallbacks.OnAgentBotCallback(ctx, query)
+	}
+	if query.BotUserID == domain.ChatBotUserID {
+		if s.agentCallbacks == nil {
+			return domain.BotCallbackAnswer{}, true, nil
+		}
+		return s.agentCallbacks.OnAgentBotCallback(ctx, query)
 	}
 	if query.BotUserID == gramsrvOperatorBotUserID {
 		return s.onGramsrvOperatorCallback(ctx, query)

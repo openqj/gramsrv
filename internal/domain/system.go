@@ -25,7 +25,7 @@ const (
 	// StickersBotAccessHash 固定不变；与 postgres 种子行双写，必须保持一致。
 	StickersBotAccessHash int64 = 5213187021149032991
 
-	// ChatBotUserID 是内置 @ChatBot 账号。它把私聊文本转给 server AI provider 链。
+	// ChatBotUserID 是内置 @ChatBot Bot transport 账号；Agent profile 和运行时由 Gateway 管理。
 	ChatBotUserID int64 = 1250000007
 	// ChatBotAccessHash 固定不变；与 postgres 种子行双写，必须保持一致。
 	ChatBotAccessHash int64 = 6332902371644871201
@@ -171,7 +171,7 @@ func OfficialSystemUser() User {
 // only the default snapshot; startup reconciliation and the memory backend use
 // these helpers so custom deployments do not expose stale "telesrv" text.
 func ChatBotDescription() string {
-	return "Chat with the configured " + branding.ProductName() + " AI provider."
+	return "Chat with the configured " + branding.ProductName() + " AI assistant."
 }
 
 func StickersBotDescription() string {

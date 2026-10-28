@@ -75,7 +75,7 @@ func starGiftResaleAppConfigFragment() string {
 	return `,"stars_stargift_resale_amount_min":` + strconv.FormatInt(domain.MinStarGiftResaleStars, 10)
 }
 
-const defaultAppConfigHash = 37 // 默认 app config 内容变更时必须递增，否则缓存端只会收到 notModified。
+const defaultAppConfigHash = 39 // 默认 app config 内容变更时必须递增，否则缓存端只会收到 notModified。
 
 // Service 提供客户端启动配置与国家区号目录。
 //
@@ -87,8 +87,10 @@ type Service struct {
 	appConfigs              store.AppConfigStore
 	countries               store.CountryStore
 	accountFreeze           AccountFreezeProvider
+	agentBots               AgentBotUsernamesProvider
 	mapboxToken             string
 	premiumBot              string
+	agentBot                string
 	walletEnabled           bool
 	walletInternalTransfers bool
 
@@ -107,9 +109,19 @@ type AccountFreezeProvider interface {
 	AccountFreeze(ctx context.Context, userID int64) (domain.AccountFreeze, bool, error)
 }
 
+type AgentBotUsernamesProvider interface {
+	AgentBotUsernames(ctx context.Context, ownerUserID int64) ([]string, error)
+}
+
 func WithAccountFreezeProvider(provider AccountFreezeProvider) Option {
 	return func(s *Service) {
 		s.accountFreeze = provider
+	}
+}
+
+func WithAgentBotUsernamesProvider(provider AgentBotUsernamesProvider) Option {
+	return func(s *Service) {
+		s.agentBots = provider
 	}
 }
 
@@ -126,6 +138,16 @@ func WithPremiumBotUsername(username string) Option {
 		username = strings.TrimPrefix(strings.TrimSpace(username), "@")
 		if domain.ValidBotUsername(username) {
 			s.premiumBot = username
+		}
+	}
+}
+
+// WithAgentBotUsername publishes only the public username of the Agent bot.
+func WithAgentBotUsername(username string) Option {
+	return func(s *Service) {
+		username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+		if domain.ValidBotUsername(username) {
+			s.agentBot = username
 		}
 	}
 }
@@ -168,32 +190,45 @@ func defaultAppConfigJSON(mapboxToken string) []byte {
 }
 
 func defaultAppConfigWithPremiumBot(mapboxToken, premiumBotUsername string, walletAvailable bool) domain.AppConfig {
-	jsonBytes := defaultAppConfigJSONWithPremiumBot(mapboxToken, premiumBotUsername, walletAvailable)
+	return defaultAppConfigWithBots(mapboxToken, premiumBotUsername, "", walletAvailable)
+}
+
+func defaultAppConfigWithBots(mapboxToken, premiumBotUsername, agentBotUsername string, walletAvailable bool) domain.AppConfig {
+	jsonBytes := defaultAppConfigJSONWithBots(mapboxToken, premiumBotUsername, agentBotUsername, walletAvailable)
 	return domain.AppConfig{
 		Client: tdesktopClient,
-		Hash:   defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername, walletAvailable),
+		Hash:   defaultAppConfigHashForBots(mapboxToken, premiumBotUsername, agentBotUsername, walletAvailable),
 		JSON:   jsonBytes,
 	}
 }
 
 func defaultAppConfigJSONWithPremiumBot(mapboxToken, premiumBotUsername string, walletAvailable bool) []byte {
+	return defaultAppConfigJSONWithBots(mapboxToken, premiumBotUsername, "", walletAvailable)
+}
+
+func defaultAppConfigJSONWithBots(mapboxToken, premiumBotUsername, agentBotUsername string, walletAvailable bool) []byte {
 	if !domain.ValidBotUsername(premiumBotUsername) {
 		premiumBotUsername = domain.PremiumBotUser().Username
 	}
 	username, _ := json.Marshal(premiumBotUsername)
 	premiumFragment := `,"premium_bot_username":` + string(username)
+	agentBotFragment := ""
+	if domain.ValidBotUsername(agentBotUsername) {
+		agentBotJSON, _ := json.Marshal(agentBotUsername)
+		agentBotFragment = `,"agent_bot_username":` + string(agentBotJSON)
+	}
 	androidInvoiceBilling := `,"premium_playmarket_direct_currency_list":` + compatandroid.DirectInvoiceCurrenciesJSON()
 	wallet := tonAppConfigFragment() + walletAppConfigFragment(walletAvailable)
 	resale := starGiftResaleAppConfigFragment()
 	if mapboxToken == "" {
-		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + wallet + resale + `}`)
+		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + agentBotFragment + androidInvoiceBilling + wallet + resale + `}`)
 	}
 	token, err := json.Marshal(mapboxToken)
 	if err != nil {
-		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + wallet + resale + `}`)
+		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + agentBotFragment + androidInvoiceBilling + wallet + resale + `}`)
 	}
 	tokenJSON := string(token)
-	return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + wallet + resale + `,"tdesktop_config_map":{"maps":` + tokenJSON + `,"geo":` + tokenJSON + `,"bmaps":` + tokenJSON + `,"bgeo":` + tokenJSON + `}}`)
+	return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + agentBotFragment + androidInvoiceBilling + wallet + resale + `,"tdesktop_config_map":{"maps":` + tokenJSON + `,"geo":` + tokenJSON + `,"bmaps":` + tokenJSON + `,"bgeo":` + tokenJSON + `}}`)
 }
 
 func defaultAppConfigHashFor(mapboxToken string) int {
@@ -201,12 +236,19 @@ func defaultAppConfigHashFor(mapboxToken string) int {
 }
 
 func defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername string, walletAvailable bool) int {
+	return defaultAppConfigHashForBots(mapboxToken, premiumBotUsername, "", walletAvailable)
+}
+
+func defaultAppConfigHashForBots(mapboxToken, premiumBotUsername, agentBotUsername string, walletAvailable bool) int {
 	if !domain.ValidBotUsername(premiumBotUsername) {
 		premiumBotUsername = domain.PremiumBotUser().Username
 	}
 	hash := defaultAppConfigHash
 	if premiumBotUsername != domain.PremiumBotUser().Username {
 		hash += 1 + int(crc32.ChecksumIEEE([]byte(premiumBotUsername))&0x1fffffff)
+	}
+	if domain.ValidBotUsername(agentBotUsername) {
+		hash += 1 + int(crc32.ChecksumIEEE([]byte(agentBotUsername))&0x1fffffff)
 	}
 	// The JSON gains wallet_available, so a client holding the old hash has to be
 	// told to refetch instead of receiving appConfigNotModified.
@@ -217,6 +259,38 @@ func defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername string, w
 		return hash
 	}
 	return hash + 1 + int(crc32.ChecksumIEEE([]byte(mapboxToken))&0x1fffffff)
+}
+
+func withAgentBotUsername(cfg domain.AppConfig, username string) domain.AppConfig {
+	values := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(cfg.JSON, &values); err != nil {
+		return cfg
+	}
+	changed := false
+	if domain.ValidBotUsername(username) {
+		encoded, _ := json.Marshal(username)
+		var current string
+		if raw, exists := values["agent_bot_username"]; !exists || json.Unmarshal(raw, &current) != nil || current != username {
+			values["agent_bot_username"] = encoded
+			changed = true
+		}
+	} else if _, exists := values["agent_bot_username"]; exists {
+		delete(values, "agent_bot_username")
+		changed = true
+	}
+	if !changed {
+		return cfg
+	}
+	body, err := json.Marshal(values)
+	if err != nil {
+		return cfg
+	}
+	hashInput := append([]byte(strconv.Itoa(cfg.Hash)+"\x00"), body...)
+	hash := int(crc32.ChecksumIEEE(hashInput) & 0x7fffffff)
+	if hash == 0 || hash == cfg.Hash {
+		hash = cfg.Hash + 1
+	}
+	return domain.AppConfig{Client: cfg.Client, Hash: hash, JSON: body}
 }
 
 // GetAppConfig returns the cached global app config plus an authenticated,
@@ -246,7 +320,22 @@ func (s *Service) accountAppConfig(ctx context.Context, userID int64, base domai
 			changed = true
 		}
 	}
+	if _, exists := values["agent_bot_usernames"]; exists {
+		delete(values, "agent_bot_usernames")
+		changed = true
+	}
 	if userID > 0 {
+		if s != nil && s.agentBots != nil {
+			agentBotUsernames, err := s.agentBots.AgentBotUsernames(ctx, userID)
+			if err != nil {
+				return domain.AppConfig{}, fmt.Errorf("load account Agent bots: %w", err)
+			}
+			if len(agentBotUsernames) > 0 {
+				encoded, _ := json.Marshal(agentBotUsernames)
+				values["agent_bot_usernames"] = encoded
+				changed = true
+			}
+		}
 		if s != nil && s.accountFreeze != nil {
 			freeze, found, err := s.accountFreeze.AccountFreeze(ctx, userID)
 			if err != nil {
@@ -280,7 +369,7 @@ func (s *Service) loadAppConfig(ctx context.Context) domain.AppConfig {
 	if s == nil {
 		return defaultAppConfig("")
 	}
-	defaultCfg := defaultAppConfigWithPremiumBot(s.mapboxToken, s.premiumBot, s.walletEnabled)
+	defaultCfg := defaultAppConfigWithBots(s.mapboxToken, s.premiumBot, s.agentBot, s.walletEnabled)
 	if s.walletEnabled && s.walletInternalTransfers {
 		var values map[string]json.RawMessage
 		if json.Unmarshal(defaultCfg.JSON, &values) == nil {
@@ -301,8 +390,14 @@ func (s *Service) loadAppConfig(ctx context.Context) domain.AppConfig {
 		// DB 行允许运维覆盖，但 hash 落后于代码默认值时视为陈旧（历史 seed 残留），
 		// 以默认值为准——否则新增配置 key 永远被旧行遮蔽（曾导致 emojies_send_dice 未下发）。
 		// 读失败也回退默认值(默认值恒有效),不让一次瞬时 DB 抖动污染整个进程生命周期的缓存。
-		if err != nil || !found || cfg.Hash < defaultAppConfigHash {
+		minimumHash := defaultAppConfigHash
+		if domain.ValidBotUsername(s.agentBot) {
+			minimumHash++
+		}
+		if err != nil || !found || cfg.Hash < minimumHash {
 			cfg = defaultCfg
+		} else {
+			cfg = withAgentBotUsername(cfg, s.agentBot)
 		}
 		s.appConfigCache = cfg
 	})

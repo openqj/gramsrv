@@ -31,6 +31,11 @@ type channelSendSnapshotEnvelope struct {
 type privateSendFingerprintPayload struct {
 	Version         int                        `json:"version"`
 	RecipientUserID int64                      `json:"recipient_user_id"`
+	AgentPeerID     int64                      `json:"agent_peer_id,omitempty"`
+	AgentSessionID  string                     `json:"agent_session_id,omitempty"`
+	AgentTaskID     string                     `json:"agent_task_id,omitempty"`
+	AgentEventID    string                     `json:"agent_event_id,omitempty"`
+	AgentRole       string                     `json:"agent_role,omitempty"`
 	Message         string                     `json:"message"`
 	Entities        []domain.MessageEntity     `json:"entities"`
 	Media           *domain.MessageMedia       `json:"media"`
@@ -96,6 +101,11 @@ func PrivateSendFingerprint(req domain.SendPrivateTextRequest) ([]byte, error) {
 	payload, err := json.Marshal(privateSendFingerprintPayload{
 		Version:         privateSendFingerprintVersion,
 		RecipientUserID: req.RecipientUserID,
+		AgentPeerID:     req.AgentConversationPeerID,
+		AgentSessionID:  req.AgentSessionID,
+		AgentTaskID:     req.AgentTaskID,
+		AgentEventID:    req.AgentEventID,
+		AgentRole:       req.AgentRole,
 		Message:         req.Message,
 		Entities:        req.Entities,
 		Media:           req.Media,

@@ -47,6 +47,19 @@ func (r *Router) checkedMessageReadPeer(ctx context.Context, userID int64, input
 		if peer.UserID <= 0 {
 			return domain.Peer{}, invalid()
 		}
+		if domain.IsAgentCompatibilityPeerID(peer.UserID) {
+			if peer.AccessHash != 0 || r.deps.PrivateAgents == nil {
+				return domain.Peer{}, invalid()
+			}
+			_, found, err := r.deps.PrivateAgents.ResolveConversation(ctx, userID, peer.UserID)
+			if err != nil {
+				return domain.Peer{}, internalErr()
+			}
+			if !found {
+				return domain.Peer{}, invalid()
+			}
+			return domain.Peer{Type: domain.PeerTypeUser, ID: peer.UserID}, nil
+		}
 		if r.deps.Users == nil {
 			return domain.Peer{}, internalErr()
 		}

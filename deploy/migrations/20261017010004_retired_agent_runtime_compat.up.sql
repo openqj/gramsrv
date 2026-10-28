@@ -1,0 +1,2 @@
+-- Preserve the retired Agent runtime migration version for existing databases.
+-- New databases intentionally skip the removed in-process runtime schema.

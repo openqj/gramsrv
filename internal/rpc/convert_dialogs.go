@@ -71,6 +71,7 @@ func tgMessagesDialogs(viewerUserID int64, list domain.DialogList) tg.MessagesDi
 		}
 	}
 	users := tgUsersForViewer(viewerUserID, list.Users)
+	users = appendPrivateAgentUsersForDialogs(users, list.Dialogs)
 	chats := tgChannelsForDialogs(viewerUserID, list.Channels, list.Dialogs)
 	chats, users = appendCommunityDialogObjects(viewerUserID, list, chats, users)
 	if list.Count > len(dialogs) {
@@ -122,9 +123,51 @@ func tgPeerDialogs(viewerUserID int64, list domain.DialogList, st domain.UpdateS
 			out.Users = append(out.Users, tgUser(u))
 		}
 	}
+	out.Users = appendPrivateAgentUsersForDialogs(out.Users, list.Dialogs)
 	out.Chats = append(out.Chats, tgChannelsForDialogs(viewerUserID, list.Channels, list.Dialogs)...)
 	out.Chats, out.Users = appendCommunityDialogObjects(viewerUserID, list, out.Chats, out.Users)
 	return out
+}
+
+func appendPrivateAgentUsersForDialogs(users []tg.UserClass, dialogs []domain.Dialog) []tg.UserClass {
+	ids := make([]int64, 0)
+	agentIDs := make(map[int64]struct{})
+	titles := make(map[int64]string)
+	for _, dialog := range dialogs {
+		if dialog.FolderID == -2 && domain.IsAgentCompatibilityPeerID(dialog.Peer.ID) {
+			if _, exists := agentIDs[dialog.Peer.ID]; exists {
+				continue
+			}
+			agentIDs[dialog.Peer.ID] = struct{}{}
+			ids = append(ids, dialog.Peer.ID)
+			titles[dialog.Peer.ID] = dialog.AgentTitle
+		}
+	}
+	if len(ids) == 0 {
+		return users
+	}
+	filtered := users[:0]
+	for _, user := range users {
+		var id int64
+		switch value := user.(type) {
+		case *tg.User:
+			id = value.ID
+		case *tg.UserEmpty:
+			id = value.ID
+		}
+		if _, syntheticAgentPeer := agentIDs[id]; syntheticAgentPeer {
+			continue
+		}
+		filtered = append(filtered, user)
+	}
+	for _, id := range ids {
+		if title := titles[id]; title != "" {
+			filtered = append(filtered, &tg.User{ID: id, FirstName: title})
+		} else {
+			filtered = append(filtered, &tg.UserEmpty{ID: id})
+		}
+	}
+	return filtered
 }
 
 // tgDialogFolder 把归档摘要转成 dialogFolder#71bd134c 条目。当前未接

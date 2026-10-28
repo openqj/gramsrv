@@ -67,7 +67,7 @@ func (r *Router) onUsersGetUsers(ctx context.Context, ids []tg.InputUserClass) (
 			needSelf = true
 			inputs = append(inputs, userInput{self: true})
 		case *tg.InputUser:
-			if !authorized || v.UserID == 0 {
+			if !authorized || v.UserID == 0 || domain.IsAgentCompatibilityPeerID(v.UserID) {
 				continue
 			}
 			inputs = append(inputs, userInput{userID: v.UserID, accessHash: v.AccessHash})
@@ -632,7 +632,7 @@ func (r *Router) onUsersGetRequirementsToContact(ctx context.Context, ids []tg.I
 		case *tg.InputUserSelf:
 			inputs[i] = requirementInput{userID: currentUserID, self: true}
 		case *tg.InputUser:
-			if value == nil || value.UserID == 0 {
+			if value == nil || value.UserID == 0 || domain.IsAgentCompatibilityPeerID(value.UserID) {
 				continue
 			}
 			inputs[i] = requirementInput{userID: value.UserID, accessHash: value.AccessHash}
@@ -993,6 +993,9 @@ func (r *Router) userFromInput(ctx context.Context, currentUserID int64, id tg.I
 		u, err := r.deps.Users.Self(ctx, currentUserID)
 		return u, err == nil, err
 	case *tg.InputUser:
+		if domain.IsAgentCompatibilityPeerID(v.UserID) {
+			return domain.User{}, false, nil
+		}
 		u, found, err := r.deps.Users.ByID(ctx, currentUserID, v.UserID)
 		if err != nil || !found {
 			return domain.User{}, found, err

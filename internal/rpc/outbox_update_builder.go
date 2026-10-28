@@ -56,13 +56,14 @@ func (r *Router) BuildOutboxUpdates(ctx context.Context, requests []OutboxUpdate
 			if len(refs) == 0 {
 				continue
 			}
-			if userIDsByViewer[viewerUserID] == nil {
-				userIDsByViewer[viewerUserID] = make(map[int64]struct{}, len(refs))
-			}
 			for id := range refs {
-				if _, system := domain.SystemUserByID(id); !system {
-					userIDsByViewer[viewerUserID][id] = struct{}{}
+				if _, system := domain.SystemUserByID(id); system || domain.IsAgentCompatibilityPeerID(id) {
+					continue
 				}
+				if userIDsByViewer[viewerUserID] == nil {
+					userIDsByViewer[viewerUserID] = make(map[int64]struct{}, len(refs))
+				}
+				userIDsByViewer[viewerUserID][id] = struct{}{}
 			}
 		}
 		groups[viewerUserID] = items

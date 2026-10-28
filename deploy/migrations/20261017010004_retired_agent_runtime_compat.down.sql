@@ -1,0 +1,1 @@
+-- This compatibility migration does not change the schema.

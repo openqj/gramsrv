@@ -293,6 +293,16 @@ type Config struct {
 	OTPWebhookURL     string
 	OTPWebhookSecret  string
 	OTPWebhookTimeout time.Duration
+	// AgentGateway* configure the private Gramsrv/Gateway HMAC boundary. The
+	// keyring JSON maps Gateway ID -> key ID -> raw UTF-8 shared secret (at least
+	// 32 bytes); secrets are never included in help config or logs.
+	AgentGatewayURL         string
+	AgentGatewayInstanceID  string
+	AgentGatewayKeyID       string
+	AgentGatewaySecret      string
+	AgentGatewayID          string
+	AgentGatewayKeysJSON    string
+	AgentGatewayHTTPTimeout time.Duration
 	// ASRURL/ASRTimeout 指向本地 ASR HTTP 后端（whisper-server 的 /inference）。
 	// URL 为空则语音转文字不可用，messages.transcribeAudio 显式回 TRANSCRIPTION_FAILED。
 	ASRURL     string
@@ -1105,6 +1115,13 @@ func Load() (Config, error) {
 		OTPWebhookURL:                     envOr("TELESRV_OTP_WEBHOOK_URL", ""),
 		OTPWebhookSecret:                  envOr("TELESRV_OTP_WEBHOOK_SECRET", ""),
 		OTPWebhookTimeout:                 envDurationOr("TELESRV_OTP_WEBHOOK_TIMEOUT", 5*time.Second),
+		AgentGatewayURL:                   strings.TrimSpace(envOr("TELESRV_AGENT_GATEWAY_URL", "")),
+		AgentGatewayInstanceID:            strings.TrimSpace(envOr("TELESRV_AGENT_GATEWAY_INSTANCE_ID", "")),
+		AgentGatewayKeyID:                 strings.TrimSpace(envOr("TELESRV_AGENT_GATEWAY_KEY_ID", "")),
+		AgentGatewaySecret:                envOr("TELESRV_AGENT_GATEWAY_SECRET", ""),
+		AgentGatewayID:                    strings.TrimSpace(envOr("TELESRV_AGENT_GATEWAY_ID", "")),
+		AgentGatewayKeysJSON:              envOr("TELESRV_AGENT_GATEWAY_KEYS_JSON", ""),
+		AgentGatewayHTTPTimeout:           envDurationOr("TELESRV_AGENT_GATEWAY_HTTP_TIMEOUT", 3*time.Second),
 		ASRURL:                            strings.TrimSpace(envOr("TELESRV_ASR_URL", "")),
 		ASRTimeout:                        envDurationOr("TELESRV_ASR_TIMEOUT", 120*time.Second),
 		SMTPHost:                          envOr("TELESRV_SMTP_HOST", ""),

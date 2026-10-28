@@ -138,7 +138,10 @@ func (s *Service) OnPrivateMessage(ctx context.Context, botUserID int64, msg dom
 	case domain.StickersBotUserID:
 		go s.respondAsStickers(userID, msg)
 	case domain.ChatBotUserID:
-		go s.respondAsChatBot(userID, msg)
+		// Authenticated @ChatBot messages are written to the Gateway ingress
+		// outbox by MessageStore in the message transaction. No local AI responder
+		// consumes /start or generates a parallel reply.
+		return
 	case domain.VerifyBotUserID:
 		go s.respondAsVerify(userID, msg)
 	case domain.VerifierBotUserID:

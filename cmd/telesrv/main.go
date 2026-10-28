@@ -27,6 +27,7 @@ import (
 	adminapp "telesrv/internal/admin"
 	"telesrv/internal/adminapi"
 	"telesrv/internal/app/account"
+	agentgatewayapp "telesrv/internal/app/agentgateway"
 	aiapp "telesrv/internal/app/ai"
 	"telesrv/internal/app/auth"
 	authdiagnosticsapp "telesrv/internal/app/authdiagnostics"
@@ -55,6 +56,7 @@ import (
 	pollsapp "telesrv/internal/app/polls"
 	premiumapp "telesrv/internal/app/premium"
 	privacyapp "telesrv/internal/app/privacy"
+	privateagentapp "telesrv/internal/app/privateagent"
 	ratingapp "telesrv/internal/app/rating"
 	secretchatapp "telesrv/internal/app/secretchat"
 	"telesrv/internal/app/stargifts"
@@ -931,9 +933,21 @@ func run(logger *zap.Logger) error {
 	)
 	dialogStore := postgres.NewDialogStore(pool)
 	chatlistStore := postgres.NewChatlistStore(pool)
-	messageStore := postgres.NewMessageStore(pool,
+	if strings.TrimSpace(cfg.AgentGatewayURL) != "" && strings.TrimSpace(cfg.BotAPIAddr) == "" {
+		return fmt.Errorf("TELESRV_AGENT_GATEWAY_URL requires TELESRV_BOT_API_ADDR for the authenticated delivery endpoint")
+	}
+	agentGatewayStore := postgres.NewAgentGatewayStore(pool)
+	privateAgentStore := postgres.NewPrivateAgentStore(pool)
+	messageStoreOptions := []postgres.MessageStoreOption{
 		postgres.WithMessageAllocators(boxIDAllocator),
-		postgres.WithMessageLogger(logger.Named("store").Named("messages")))
+		postgres.WithMessageLogger(logger.Named("store").Named("messages")),
+	}
+	if strings.TrimSpace(cfg.AgentGatewayURL) != "" {
+		botAPIUpdateStore.SetAgentGatewayGroupEnqueuer(agentGatewayStore.EnqueueGroupMessageTx)
+		messageStoreOptions = append(messageStoreOptions,
+			postgres.WithAgentGatewayInboundHook(agentGatewayStore.EnqueueMessageTx))
+	}
+	messageStore := postgres.NewMessageStore(pool, messageStoreOptions...)
 	broadcastStore := postgres.NewBroadcastStore(pool)
 	broadcastService := broadcastapp.NewService(broadcastStore, messageStore, logger.Named("app").Named("broadcast"))
 	// 共享频道行/成员缓存 + 统一 read-model LISTEN/NOTIFY 实时失效：消除高频「逐 RPC
@@ -1605,7 +1619,6 @@ func run(logger *zap.Logger) error {
 	)
 	privacyService.ConfigureReadModels(usersService, channelStore)
 	aiComposeService := aiapp.NewService(aiComposeStore, newAIComposeOptions(cfg, rateLimiter, usersService.PremiumActive, logger)...)
-	botsService.SetAIChatGenerator(aiComposeService)
 	dialogsService := dialogs.NewService(dialogStore, channelStore).Configure(
 		dialogs.WithContactStore(contactStore),
 		dialogs.WithPhotoProvider(cachedPhotos),
@@ -1674,6 +1687,17 @@ func run(logger *zap.Logger) error {
 		messageapp.WithRecipientUserReader(userStore),
 		messageapp.WithBusinessAutomation(passwordStore, businessAutomationOptions...),
 	)
+	privateAgentService, err := privateagentapp.New(privateagentapp.Config{
+		GatewayBaseURL: cfg.AgentGatewayURL,
+		InstanceID:     cfg.AgentGatewayInstanceID,
+		KeyID:          cfg.AgentGatewayKeyID,
+		Secret:         cfg.AgentGatewaySecret,
+		HTTPTimeout:    cfg.AgentGatewayHTTPTimeout,
+		TitleUpdates:   rpc.PrivateAgentSessionTitleUpdatePublisher{Sessions: activeSessions},
+	}, privateAgentStore, messagesService, logger.Named("private-agent"))
+	if err != nil {
+		return fmt.Errorf("create private Agent service: %w", err)
+	}
 	moderationService := moderationapp.NewService(
 		moderationReportStore,
 		moderationapp.WithMessageReaders(messagesService, channelsService),
@@ -1869,6 +1893,23 @@ func run(logger *zap.Logger) error {
 	} else {
 		logger.Info("应用内 TON 钱包未启用：wallet.* 回 WALLET_UNAVAILABLE")
 	}
+	helpOptions := []help.Option{
+		help.WithMapboxToken(cfg.MapboxToken),
+		help.WithPremiumBotUsername(cfg.PremiumBotUsername),
+		// The wallet requires an explicit state directory; an empty directory is how an
+		// operator turns it off, and that is exactly when a client must be told
+		// the wallet is unavailable rather than shown an entry that cannot work.
+		help.WithWalletAvailable(walletService != nil),
+		help.WithInternalWalletTransfers(cfg.WalletInternalTransfers),
+		help.WithAccountFreezeProvider(adminService),
+	}
+	if strings.TrimSpace(cfg.AgentGatewayURL) != "" {
+		helpOptions = append(helpOptions,
+			help.WithAgentBotUsername(domain.ChatBotUser().Username),
+			help.WithAgentBotUsernamesProvider(agentGatewayStore),
+		)
+	}
+	helpService := help.NewService(helpStore, helpStore, helpOptions...)
 	router := rpc.New(rpc.Config{
 		DC:                       cfg.DC,
 		DefaultCountryCode:       cfg.DefaultCountryCode,
@@ -1912,23 +1953,15 @@ func run(logger *zap.Logger) error {
 		PresenceLastSeenBatchTimeout:   cfg.PresenceLastSeenBatchTimeout,
 		PresenceLastSeenDrainTimeout:   cfg.PresenceLastSeenDrainTimeout,
 	}, rpc.Deps{
-		Auth:                 authService,
-		AuthDeliveryReports:  authDeliveryReportService,
-		ClientTelemetry:      clientTelemetryService,
-		AuthKeySessionLayers: authKeySessionLayerStore,
-		ReadModelVersions:    readModelVersionStore,
-		UserProjectionFacts:  userProjectionFacts,
-		Account:              accountService,
-		Privacy:              privacyService,
-		Help: help.NewService(helpStore, helpStore,
-			help.WithMapboxToken(cfg.MapboxToken),
-			help.WithPremiumBotUsername(cfg.PremiumBotUsername),
-			// The wallet requires an explicit state directory; an empty directory is how an
-			// operator turns it off, and that is exactly when a client must be told
-			// the wallet is unavailable rather than shown an entry that cannot work.
-			help.WithWalletAvailable(walletService != nil),
-			help.WithInternalWalletTransfers(cfg.WalletInternalTransfers),
-			help.WithAccountFreezeProvider(adminService)),
+		Auth:                         authService,
+		AuthDeliveryReports:          authDeliveryReportService,
+		ClientTelemetry:              clientTelemetryService,
+		AuthKeySessionLayers:         authKeySessionLayerStore,
+		ReadModelVersions:            readModelVersionStore,
+		UserProjectionFacts:          userProjectionFacts,
+		Account:                      accountService,
+		Privacy:                      privacyService,
+		Help:                         helpService,
 		AppUpdates:                   appUpdateResolver,
 		AccountFreeze:                userProjectionFacts,
 		AccountFreezeNotifications:   adminService,
@@ -1947,6 +1980,8 @@ func run(logger *zap.Logger) error {
 		Updates:                      updatesService,
 		BootstrapUpdates:             bootstrapUpdateStore,
 		BotAPIUpdates:                botAPIUpdateStore,
+		AgentGatewayGroupEnabled:     strings.TrimSpace(cfg.AgentGatewayURL) != "",
+		PrivateAgents:                privateAgentService,
 		BotCallbacks:                 botCallbackStore,
 		Contacts:                     contactsService,
 		Dialogs:                      dialogsService,
@@ -2130,10 +2165,34 @@ func run(logger *zap.Logger) error {
 		moderationActionExecutor,
 		logger.Named("moderation").Named("actions"),
 	).Run(ctx)
-	// bot session 撤销、在线通知与 @ChatBot 流式草稿推送经 router 实现（需 tg.* 边界），
-	// router 创建后注入。
+	// bot session 撤销与在线通知经 router 实现（需 tg.* 边界），router 创建后注入。
 	botsService.SetRouterHooks(router)
-	botsService.SetTextDraftPusher(router)
+	var agentGatewayService *agentgatewayapp.Service
+	if strings.TrimSpace(cfg.AgentGatewayURL) != "" {
+		gatewayKeys, err := agentgatewayapp.ParseGatewayKeysJSON(cfg.AgentGatewayKeysJSON)
+		if err != nil {
+			return fmt.Errorf("parse agent gateway keyring: %w", err)
+		}
+		agentGatewayService, err = agentgatewayapp.New(agentgatewayapp.Config{
+			GatewayBaseURL: cfg.AgentGatewayURL,
+			InstanceID:     cfg.AgentGatewayInstanceID,
+			GatewayID:      cfg.AgentGatewayID,
+			OutboundKeyID:  cfg.AgentGatewayKeyID,
+			OutboundSecret: cfg.AgentGatewaySecret,
+			GatewayKeys:    gatewayKeys,
+			GroupAuthority: channelsService,
+			BotProfiles:    botsService,
+			HTTPTimeout:    cfg.AgentGatewayHTTPTimeout,
+		}, agentGatewayStore, router, logger.Named("agent-gateway"))
+		if err != nil {
+			return fmt.Errorf("create agent gateway adapter: %w", err)
+		}
+		if privateAgentService != nil {
+			agentGatewayService.SetPrivateEventConsumer(privateAgentService)
+		}
+		botsService.SetAgentBotCallbackForwarder(agentGatewayService)
+		go agentGatewayService.Run(ctx)
+	}
 	transcriptionService.SetCompletionHandler(router.PushTranscribedAudioUpdate)
 	go rpc.NewOutboxDispatcher(updateEventStore, dispatchOutboxStore, activeSessions, logger.Named("rpc").Named("outbox"),
 		rpc.WithOutboxWorkers(cfg.OutboxWorkers),
@@ -2226,7 +2285,11 @@ func run(logger *zap.Logger) error {
 			}(chain.Key, chainLog)
 		}
 	}
-	if _, err := botapi.Start(ctx, cfg.BotAPIAddr, botsService, usersService, router, router, router, logger.Named("botapi")); err != nil {
+	botAPIOptions := make([]botapi.StartOption, 0, 1)
+	if agentGatewayService != nil {
+		botAPIOptions = append(botAPIOptions, botapi.WithAgentGatewayHandler(agentGatewayService.GatewayHTTPHandler()))
+	}
+	if _, err := botapi.Start(ctx, cfg.BotAPIAddr, botsService, usersService, router, router, router, logger.Named("botapi"), botAPIOptions...); err != nil {
 		return fmt.Errorf("start bot api: %w", err)
 	}
 	// Scoped tokens carry a bounded permission set; the master token stays

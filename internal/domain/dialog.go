@@ -14,6 +14,19 @@ const (
 	PeerTypeFolder PeerType = "folder"
 )
 
+// AgentCompatibilityPeerID reserves a positive MTProto PeerUser ID range for
+// owner-scoped private Agent conversation handles. These IDs are never users;
+// every operation must resolve them against the authenticated owner's session
+// mapping before it can access conversation data.
+const (
+	AgentCompatibilityPeerIDMin int64 = 4_000_000_000_000
+	AgentCompatibilityPeerIDMax int64 = 4_000_999_999_999
+)
+
+func IsAgentCompatibilityPeerID(id int64) bool {
+	return id >= AgentCompatibilityPeerIDMin && id <= AgentCompatibilityPeerIDMax
+}
+
 const (
 	// DialogMainFolderID 是 TDesktop 主会话列表 folder_id。
 	DialogMainFolderID = 0
@@ -69,7 +82,10 @@ func (p Peer) IsSelfUser(userID int64) bool {
 
 // Dialog 是账号的一条会话摘要。
 type Dialog struct {
-	Peer           Peer
+	Peer Peer
+	// AgentTitle is a title for a reserved private Agent compatibility peer. It
+	// is projected only as that synthetic peer's MTProto user name.
+	AgentTitle     string
 	ChannelLeft    bool
 	FolderID       int
 	TopMessage     int

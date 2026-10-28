@@ -136,7 +136,28 @@ WHERE (peer_usernames.username_lower, peer_usernames.username)
 }
 
 func (s *MessageStore) SendPrivateText(ctx context.Context, req domain.SendPrivateTextRequest) (res domain.SendPrivateTextResult, err error) {
-	return s.sendPrivateTextWithHooks(ctx, req, privateSendTxHooks{})
+	hooks := privateSendTxHooks{}
+	if hook := s.agentGatewayInboundHook; hook != nil &&
+		req.SenderUserID > 0 && req.AgentGatewayBotOwnerUserID == req.SenderUserID &&
+		req.RecipientUserID > 0 && req.RecipientUserID != req.SenderUserID &&
+		!req.RecipientBlocked && req.Message != "" {
+		hooks.after = func(ctx context.Context, tx pgx.Tx, result domain.SendPrivateTextResult) error {
+			if result.SenderMessage.ID <= 0 {
+				return fmt.Errorf("agent gateway ingress: missing authenticated sender message id")
+			}
+			return hook(ctx, tx, domain.AgentGatewayInbound{
+				Kind:                "message",
+				TelegramOwnerUserID: req.SenderUserID,
+				TelegramActorUserID: req.SenderUserID,
+				ChatBotID:           req.RecipientUserID,
+				BotUsername:         req.AgentGatewayBotUsername,
+				TelegramChatID:      req.SenderUserID,
+				TelegramMessageID:   result.SenderMessage.ID,
+				Text:                req.Message,
+			})
+		}
+	}
+	return s.sendPrivateTextWithHooks(ctx, req, hooks)
 }
 
 type privateSendTxHooks struct {
@@ -187,10 +208,23 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 	if !req.HasContent() {
 		return domain.SendPrivateTextResult{}, domain.ErrMessageEmpty
 	}
+	if req.AgentConversationPeerID != 0 {
+		if !domain.IsAgentCompatibilityPeerID(req.AgentConversationPeerID) || req.SenderUserID != req.RecipientUserID ||
+			req.AgentSessionID == "" || req.AgentTaskID == "" || req.AgentEventID == "" ||
+			(req.AgentRole != "user" && req.AgentRole != "assistant") ||
+			(req.AgentIncoming != (req.AgentRole == "assistant")) || req.Media != nil || req.ReplyMarkup != nil {
+			return domain.SendPrivateTextResult{}, fmt.Errorf("send private Agent message: invalid owner/session/message binding")
+		}
+	} else if req.AgentSessionID != "" || req.AgentTaskID != "" || req.AgentEventID != "" || req.AgentIncoming || req.AgentRole != "" {
+		return domain.SendPrivateTextResult{}, fmt.Errorf("send private text: incomplete private Agent message binding")
+	}
 	if req.Date == 0 {
 		req.Date = int(time.Now().Unix())
 	}
 	plainHotPath := plainPrivateSendHotPath(req, hooks)
+	if req.AgentConversationPeerID != 0 {
+		plainHotPath = false
+	}
 	var entities, replyMarkupJSON, richMessageJSON []byte
 	if !plainHotPath {
 		var err error
@@ -302,7 +336,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 	if err != nil {
 		return domain.SendPrivateTextResult{}, err
 	}
-	if selfMessage {
+	if selfMessage && req.AgentConversationPeerID == 0 {
 		savedPeer := domain.SavedPeerForSelfChat(req.SenderUserID, req.Forward)
 		senderMeta.SavedPeerType = string(savedPeer.Type)
 		senderMeta.SavedPeerID = savedPeer.ID
@@ -373,7 +407,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 		return domain.SendPrivateTextResult{}, err
 	}
 	ttlPeriod := req.TTLPeriod
-	if ttlPeriod == 0 {
+	if ttlPeriod == 0 && req.AgentConversationPeerID == 0 {
 		ttlPeriod, err = privateHistoryTTLPeriod(ctx, tx, req.SenderUserID, req.RecipientUserID)
 		if err != nil {
 			return domain.SendPrivateTextResult{}, fmt.Errorf("load private ttl: %w", err)
@@ -484,10 +518,10 @@ WHERE sender_user_id=$1 AND id=$2`, req.SenderUserID, pm.ID, sharedMediaJSON)
 		PrivateMessageID: pm.ID,
 		MessageSenderID:  req.SenderUserID,
 		PeerType:         string(domain.PeerTypeUser),
-		PeerID:           req.RecipientUserID,
+		PeerID:           agentConversationPeerID(req),
 		FromUserID:       req.SenderUserID,
 		MessageDate:      int32(req.Date),
-		Outgoing:         true,
+		Outgoing:         !req.AgentIncoming,
 		Body:             req.Message,
 		TtlPeriod:        int32(ttlPeriod),
 		ExpiresAt:        int32(expiresAt),
@@ -514,18 +548,37 @@ WHERE sender_user_id=$1 AND id=$2`, req.SenderUserID, pm.ID, sharedMediaJSON)
 		return domain.SendPrivateTextResult{}, err
 	}
 	sender.RandomID = req.RandomID
+	if req.AgentIncoming {
+		sender.From = domain.Peer{Type: domain.PeerTypeUser, ID: req.AgentConversationPeerID}
+	}
+	if req.AgentConversationPeerID != 0 {
+		if err := NewPrivateAgentStore(tx).InsertPrivateAgentMessageLink(ctx, req.SenderUserID, req.AgentSessionID,
+			req.AgentTaskID, req.AgentEventID, int(sender.ID), req.AgentRole, req.AgentEventType, req.AgentStatus,
+			req.AgentEventVersion, req.AgentPayload); err != nil {
+			return domain.SendPrivateTextResult{}, fmt.Errorf("persist private Agent message link: %w", err)
+		}
+	}
 	// 共享媒体索引(0118):发送者侧 box 按媒体类别建索引(peer=收件人)。
-	if err := insertMessageBoxMediaIndexTx(ctx, tx, req.SenderUserID, req.RecipientUserID, int(senderBoxID), req.Date, media.Sender, req.Entities); err != nil {
+	if err := insertMessageBoxMediaIndexTx(ctx, tx, req.SenderUserID, agentConversationPeerID(req), int(senderBoxID), req.Date, media.Sender, req.Entities); err != nil {
 		return domain.SendPrivateTextResult{}, err
 	}
-	if err := qtx.UpsertOutboxDialog(ctx, sqlcgen.UpsertOutboxDialogParams{
-		UserID:         req.SenderUserID,
-		PeerType:       string(domain.PeerTypeUser),
-		PeerID:         req.RecipientUserID,
-		TopMessageID:   int32(sender.ID),
-		TopMessageDate: int32(sender.Date),
-	}); err != nil {
-		return domain.SendPrivateTextResult{}, fmt.Errorf("upsert sender dialog: %w", err)
+	if req.AgentIncoming {
+		if err := qtx.UpsertInboxDialog(ctx, sqlcgen.UpsertInboxDialogParams{
+			UserID: req.SenderUserID, PeerType: string(domain.PeerTypeUser), PeerID: agentConversationPeerID(req),
+			TopMessageID: int32(sender.ID), TopMessageDate: int32(sender.Date),
+		}); err != nil {
+			return domain.SendPrivateTextResult{}, fmt.Errorf("upsert private Agent inbox dialog: %w", err)
+		}
+	} else {
+		if err := qtx.UpsertOutboxDialog(ctx, sqlcgen.UpsertOutboxDialogParams{
+			UserID:         req.SenderUserID,
+			PeerType:       string(domain.PeerTypeUser),
+			PeerID:         agentConversationPeerID(req),
+			TopMessageID:   int32(sender.ID),
+			TopMessageDate: int32(sender.Date),
+		}); err != nil {
+			return domain.SendPrivateTextResult{}, fmt.Errorf("upsert sender dialog: %w", err)
+		}
 	}
 	if err := appendNewMessageEvent(ctx, qtx, sender); err != nil {
 		return domain.SendPrivateTextResult{}, err
@@ -663,6 +716,13 @@ WHERE sender_user_id = $1
 	}
 	committed = true
 	return result, nil
+}
+
+func agentConversationPeerID(req domain.SendPrivateTextRequest) int64 {
+	if req.AgentConversationPeerID != 0 {
+		return req.AgentConversationPeerID
+	}
+	return req.RecipientUserID
 }
 
 // LookupPrivateSendReplay reads an existing receipt without permission checks, source/media

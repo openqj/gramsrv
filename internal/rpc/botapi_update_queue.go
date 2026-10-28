@@ -3,7 +3,10 @@ package rpc
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"telesrv/internal/domain"
 )
@@ -15,6 +18,10 @@ const (
 
 type botAPIChannelBotMemberProvider interface {
 	ActiveBotMemberIDs(ctx context.Context, viewerUserID, channelID int64, limit int) ([]int64, error)
+}
+
+type botAPIGroupUpdateEnqueuer interface {
+	EnqueueBotAPIGroupUpdate(context.Context, domain.EnqueueBotAPIUpdateRequest, domain.AgentGatewayGroupMessageRequest) (domain.BotAPIUpdate, bool, error)
 }
 
 func (r *Router) botAPIQueuedUpdates(ctx context.Context, botID int64, offset int64) ([]domain.UpdateEvent, error) {
@@ -479,17 +486,182 @@ func (r *Router) enqueueBotAPIChannelMessageUpdateForBots(ctx context.Context, r
 		if _, skipped := skip[botID]; skipped {
 			continue
 		}
-		if _, created, err := r.deps.BotAPIUpdates.EnqueueBotAPIUpdate(ctx, domain.EnqueueBotAPIUpdateRequest{
+		request := domain.EnqueueBotAPIUpdateRequest{
 			BotUserID: botID,
 			Kind:      domain.BotAPIUpdateMessage,
 			Peer:      domain.Peer{Type: domain.PeerTypeChannel, ID: res.Message.ChannelID},
 			MessageID: res.Message.ID,
 			SourcePts: res.Event.Pts,
 			Date:      res.Message.Date,
-		}); err == nil && created {
+		}
+		var created bool
+		var err error
+		if r.deps.AgentGatewayGroupEnabled {
+			if event, eligible := r.agentGatewayGroupMessageRequest(ctx, botID, res.Channel, res.Message); eligible {
+				if groupEnqueuer, ok := r.deps.BotAPIUpdates.(botAPIGroupUpdateEnqueuer); ok {
+					_, created, err = groupEnqueuer.EnqueueBotAPIGroupUpdate(ctx, request, event)
+				} else {
+					r.log.Error("Bot API update store cannot atomically enqueue Agent Gateway group ingress")
+					_, created, err = r.deps.BotAPIUpdates.EnqueueBotAPIUpdate(ctx, request)
+				}
+			} else {
+				_, created, err = r.deps.BotAPIUpdates.EnqueueBotAPIUpdate(ctx, request)
+			}
+		} else {
+			_, created, err = r.deps.BotAPIUpdates.EnqueueBotAPIUpdate(ctx, request)
+		}
+		if err != nil {
+			r.log.Warn("enqueue Bot API channel message update", zap.Int64("bot_user_id", botID), zap.Error(err))
+			continue
+		}
+		if created {
 			r.notifyBotAPIUpdate(botID)
 		}
 	}
+}
+
+func (r *Router) agentGatewayGroupMessageRequest(ctx context.Context, botID int64, channel domain.Channel, message domain.ChannelMessage) (domain.AgentGatewayGroupMessageRequest, bool) {
+	if r == nil || !r.deps.AgentGatewayGroupEnabled || r.deps.Channels == nil || r.deps.Users == nil || r.deps.Bots == nil ||
+		!channel.Megagroup || channel.Broadcast || message.ChannelID <= 0 || message.ID <= 0 || message.SenderUserID <= 0 ||
+		botID <= 0 || message.SenderUserID == botID || message.Body == "" {
+		return domain.AgentGatewayGroupMessageRequest{}, false
+	}
+	member, err := r.deps.Channels.GetParticipant(ctx, message.SenderUserID, message.ChannelID, message.SenderUserID)
+	if err != nil || member.Status != domain.ChannelMemberActive {
+		return domain.AgentGatewayGroupMessageRequest{}, false
+	}
+	botMember, err := r.deps.Channels.GetParticipant(ctx, botID, message.ChannelID, botID)
+	if err != nil || botMember.Status != domain.ChannelMemberActive {
+		return domain.AgentGatewayGroupMessageRequest{}, false
+	}
+	profile, found, err := r.deps.Bots.BotInfo(ctx, botID)
+	if err != nil || !found || profile.BotUserID != botID || profile.OwnerUserID <= 0 {
+		return domain.AgentGatewayGroupMessageRequest{}, false
+	}
+	actor, found, err := r.deps.Users.ByID(ctx, message.SenderUserID, message.SenderUserID)
+	if err != nil || !found || actor.Bot {
+		return domain.AgentGatewayGroupMessageRequest{}, false
+	}
+	bot, found, err := r.deps.Users.ByID(ctx, message.SenderUserID, botID)
+	if err != nil || !found || !bot.Bot || strings.TrimSpace(bot.Username) == "" {
+		return domain.AgentGatewayGroupMessageRequest{}, false
+	}
+	mentioned, addressed, command := agentGatewayGroupAddressing(message.Body, message.Entities, botID, bot.Username)
+	if !mentioned && !addressed && command == "" {
+		return domain.AgentGatewayGroupMessageRequest{}, false
+	}
+	replyToID, topMessageID := 0, 0
+	if message.ReplyTo != nil {
+		replyToID = message.ReplyTo.MessageID
+		topMessageID = message.ReplyTo.TopMessageID
+	}
+	entities := make([]domain.AgentGatewayMessageEntity, 0, len(message.Entities))
+	for _, entity := range message.Entities {
+		entities = append(entities, domain.AgentGatewayMessageEntity{
+			Type: string(entity.Type), Offset: entity.Offset, Length: entity.Length, UserID: entity.UserID,
+		})
+	}
+	return domain.AgentGatewayGroupMessageRequest{
+		SchemaVersion: 1,
+		BotUserID:     botID, BotUsername: strings.TrimPrefix(strings.TrimSpace(bot.Username), "@"), BotOwnerUserID: profile.OwnerUserID, ActorUserID: message.SenderUserID,
+		ChatType: "channel", ChatID: message.ChannelID, MessageID: message.ID,
+		ReplyToMessageID: replyToID, TopMessageID: topMessageID, Date: message.Date,
+		Text: message.Body, Entities: entities, BotMentioned: mentioned, BotAddressed: addressed, DirectedCommand: command,
+	}, true
+}
+
+func agentGatewayGroupAddressing(message string, entities []domain.MessageEntity, botID int64, botUsername string) (bool, bool, string) {
+	botUsername = strings.TrimPrefix(strings.TrimSpace(botUsername), "@")
+	if botUsername == "" {
+		return false, false, ""
+	}
+	bounds := utf16ByteBoundaries(message)
+	blocked := make([]byteSpan, 0)
+	for _, entity := range entities {
+		if entity.Type != domain.MessageEntityCode && entity.Type != domain.MessageEntityPre {
+			continue
+		}
+		if span, ok := byteSpanFromUTF16Bounds(bounds, entity.Offset, entity.Length); ok {
+			blocked = append(blocked, span)
+		}
+	}
+	isBlocked := func(offset, length int) bool {
+		span, ok := byteSpanFromUTF16Bounds(bounds, offset, length)
+		if !ok {
+			return true
+		}
+		for _, code := range blocked {
+			if span.start < code.end && code.start < span.end {
+				return true
+			}
+		}
+		return false
+	}
+	mentioned, addressed := false, false
+	command := ""
+	for _, entity := range entities {
+		if entity.Type == domain.MessageEntityMentionName && entity.UserID == botID && !isBlocked(entity.Offset, entity.Length) {
+			mentioned = true
+			addressed = true
+		}
+		if entity.Type == domain.MessageEntityMention && !isBlocked(entity.Offset, entity.Length) {
+			if span, ok := byteSpanFromUTF16Bounds(bounds, entity.Offset, entity.Length); ok {
+				entityText := message[span.start:span.end]
+				if strings.HasPrefix(entityText, "@") && strings.EqualFold(entityText[1:], botUsername) {
+					mentioned = true
+					addressed = true
+				}
+			}
+		}
+		if entity.Type != domain.MessageEntityBotCommand || isBlocked(entity.Offset, entity.Length) {
+			continue
+		}
+		span, ok := byteSpanFromUTF16Bounds(bounds, entity.Offset, entity.Length)
+		if !ok || span.start != 0 {
+			continue
+		}
+		entityText := message[span.start:span.end]
+		if botCommandDirectedTo(entityText, botUsername) {
+			directed := directedAgentCommand(message[span.end:], entityText, botUsername)
+			if directed != "" {
+				command = directed
+				addressed = true
+				continue
+			}
+			if strings.EqualFold(strings.Split(strings.TrimPrefix(entityText, "/"), "@")[0], "ask") {
+				addressed = true
+			}
+		}
+	}
+	return mentioned, addressed, command
+}
+
+func directedAgentCommand(args, entityText, botUsername string) string {
+	if !botCommandDirectedTo(entityText, botUsername) {
+		return ""
+	}
+	command := strings.Split(strings.TrimPrefix(entityText, "/"), "@")
+	if !strings.EqualFold(command[0], "agent") {
+		return ""
+	}
+	fields := strings.Fields(args)
+	if len(fields) == 2 && strings.EqualFold(fields[0], "collaboration") {
+		switch strings.ToLower(fields[1]) {
+		case "on":
+			return "agent collaboration on"
+		case "off":
+			return "agent collaboration off"
+		}
+	}
+	return ""
+}
+
+func botCommandDirectedTo(entityText, botUsername string) bool {
+	if !strings.HasPrefix(entityText, "/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(entityText, "/"), "@")
+	return len(parts) == 2 && parts[0] != "" && strings.EqualFold(parts[1], botUsername)
 }
 
 func (r *Router) enqueueBotAPIChannelMessagesUpdate(ctx context.Context, originUserID int64, results []domain.SendChannelMessageResult) {

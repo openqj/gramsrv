@@ -1173,6 +1173,8 @@ type Deps struct {
 	Updates                      UpdatesService
 	BootstrapUpdates             store.BootstrapUpdateJobStore
 	BotAPIUpdates                store.BotAPIUpdateStore
+	AgentGatewayGroupEnabled     bool
+	PrivateAgents                PrivateAgentService
 	BotCallbacks                 store.BotCallbackRegistryStore
 	Contacts                     ContactsService
 	Dialogs                      DialogsService
@@ -1210,6 +1212,15 @@ type Deps struct {
 	// GeoIP 把会话记录的 IP 解析为 account.getAuthorizations 展示用的国家/地区
 	// 文案。为 nil(未配置地理后端)时列表继续回传占位文案,与启用前一致。
 	GeoIP geoip.Resolver
+}
+
+type PrivateAgentService interface {
+	CreateConversation(context.Context, int64, string) (domain.PrivateAgentSession, error)
+	ListConversations(context.Context, int64, int64, int) ([]domain.PrivateAgentSession, int, error)
+	ResolveConversation(context.Context, int64, int64) (domain.PrivateAgentSession, bool, error)
+	ResolveConversationByMessageID(context.Context, int64, int) (domain.PrivateAgentSession, bool, error)
+	SendMessage(context.Context, int64, int64, domain.SendPrivateTextRequest) (domain.SendPrivateTextResult, string, error)
+	SyncSnapshot(context.Context, int64, int64) error
 }
 
 // ThemeService 抽象自定义云主题(app/themes):创建/更新/查询主题 + 维护每用户已安装列表。

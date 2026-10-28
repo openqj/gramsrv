@@ -6,6 +6,7 @@ import (
 
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tlprofile"
+	"go.uber.org/zap"
 
 	"telesrv/internal/compat/tdesktop"
 	"telesrv/internal/domain"
@@ -408,6 +409,9 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 		return r.onMessagesGetWebPage(ctx, layerRequest)
 	})
 	registerRPC[*tg.MessagesGetDialogsRequest](d, tlprofile.SemanticMethodMessagesGetDialogs, func(ctx context.Context, req *tg.MessagesGetDialogsRequest) (any, error) {
+		if folderID, hasFolderID := req.GetFolderID(); hasFolderID && (folderID == -2 || folderID == -3) {
+			return r.privateAgentDialogs(ctx, req, folderID)
+		}
 		if r.deps.Dialogs == nil {
 			return &tg.MessagesDialogs{}, nil
 		}
@@ -544,6 +548,17 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 			list.Communities = append(list.Communities, views...)
 			list.Count += len(views)
 		}
+		agentPeers := make(map[int64]struct{})
+		for _, peer := range regularPeers {
+			if peer.Type == domain.PeerTypeUser && domain.IsAgentCompatibilityPeerID(peer.ID) {
+				agentPeers[peer.ID] = struct{}{}
+			}
+		}
+		for i := range list.Dialogs {
+			if _, isAgent := agentPeers[list.Dialogs[i].Peer.ID]; isAgent {
+				list.Dialogs[i].FolderID = -2
+			}
+		}
 		st := domain.UpdateState{Date: int(r.clock.Now().Unix())}
 		if r.deps.Updates != nil {
 			var err error
@@ -620,6 +635,11 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 		filter, err := r.messageFilterFromHistoryRequest(ctx, userID, req)
 		if err != nil {
 			return nil, err
+		}
+		if domain.IsAgentCompatibilityPeerID(filter.Peer.ID) && r.deps.PrivateAgents != nil {
+			if err := r.deps.PrivateAgents.SyncSnapshot(ctx, userID, filter.Peer.ID); err != nil {
+				r.log.Warn("sync private Agent snapshot", zap.Int64("owner_user_id", userID), zap.Error(err))
+			}
 		}
 		if filter.Peer.Type == domain.PeerTypeChannel {
 			if r.deps.Channels == nil {

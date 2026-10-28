@@ -456,7 +456,7 @@ func messageFromSavedDialogRow(row savedDialogTopRowFields) (domain.Message, err
 		UID:            row.PrivateMessageID,
 		OwnerUserID:    row.OwnerUserID,
 		Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-		From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+		From:           privateMessageFromPeer(row.PeerType, row.PeerID, row.FromUserID, row.Outgoing),
 		Date:           int(row.MessageDate),
 		EditDate:       int(row.EditDate),
 		HideEdited:     row.HideEdited,

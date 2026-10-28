@@ -17,11 +17,44 @@ import (
 
 // BotAPIUpdateStore persists Bot API getUpdates queues in PostgreSQL.
 type BotAPIUpdateStore struct {
-	db sqlcgen.DBTX
+	db                       sqlcgen.DBTX
+	agentGatewayGroupEnqueue func(context.Context, pgx.Tx, domain.AgentGatewayGroupMessageRequest) error
 }
 
 func NewBotAPIUpdateStore(db sqlcgen.DBTX) *BotAPIUpdateStore {
 	return &BotAPIUpdateStore{db: db}
+}
+
+func (s *BotAPIUpdateStore) SetAgentGatewayGroupEnqueuer(enqueue func(context.Context, pgx.Tx, domain.AgentGatewayGroupMessageRequest) error) {
+	s.agentGatewayGroupEnqueue = enqueue
+}
+
+func (s *BotAPIUpdateStore) EnqueueBotAPIGroupUpdate(ctx context.Context, request domain.EnqueueBotAPIUpdateRequest, event domain.AgentGatewayGroupMessageRequest) (domain.BotAPIUpdate, bool, error) {
+	if s == nil || s.agentGatewayGroupEnqueue == nil {
+		return domain.BotAPIUpdate{}, false, fmt.Errorf("Agent Gateway group ingress is not configured")
+	}
+	beginner, ok := s.db.(txBeginner)
+	if !ok {
+		return domain.BotAPIUpdate{}, false, fmt.Errorf("Bot API group update requires transactions")
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return domain.BotAPIUpdate{}, false, fmt.Errorf("begin Bot API group update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	update, created, err := NewBotAPIUpdateStore(tx).EnqueueBotAPIUpdate(ctx, request)
+	if err != nil {
+		return domain.BotAPIUpdate{}, false, err
+	}
+	event.BotAPIUpdateID = update.ID
+	if err := s.agentGatewayGroupEnqueue(ctx, tx, event); err != nil {
+		return domain.BotAPIUpdate{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.BotAPIUpdate{}, false, fmt.Errorf("commit Bot API group update: %w", err)
+	}
+	return update, created, nil
 }
 
 func (s *BotAPIUpdateStore) SetBotAPIWebhook(ctx context.Context, config domain.BotAPIWebhook, dropPending bool) error {

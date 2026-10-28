@@ -44,8 +44,8 @@ type userStickerSetInstaller interface {
 	InstallUserStickerSet(ctx context.Context, userID int64, setID int64, kind domain.StickerSetKind, archived bool, installedDate int) error
 }
 
-type aiChatGenerator interface {
-	GenerateTextStream(ctx context.Context, req domain.AITextGenerationRequest, emit func(domain.AIComposeText) error) (domain.AIComposeText, error)
+type chatBotCallbackForwarder interface {
+	OnAgentBotCallback(context.Context, domain.BotCallbackQuery) (domain.BotCallbackAnswer, bool, error)
 }
 
 // premiumStorefront is the deliberately narrow surface used by the built-in
@@ -112,49 +112,40 @@ type RouterHooks interface {
 	PushStickerSetsChanged(ctx context.Context, userID int64, kind domain.StickerSetKind)
 }
 
-// TextDraftPusher 推送 @ChatBot AI 流式回复的 transient 文本草稿，由 rpc 层转换为
-// UpdateUserTyping/sendMessageTextDraftAction。它独立于普通 bot hooks，避免 BotFather
-// 和 @Stickers 的测试/依赖被 AI 对话能力污染。
-type TextDraftPusher interface {
-	PushBotTextDraft(ctx context.Context, botUserID, userID, randomID int64, text string)
-}
-
 // replyLockStripes 是回复串行化条带数：同一用户的 BotFather 回复落同一条带、
 // 串行执行（状态机 RMW 原子 + 回复保序），不同用户并发；固定大小不随用户数增长。
 const replyLockStripes = 256
 
 // Service 提供 bot 账号业务。
 type Service struct {
-	users      store.UserStore
-	bots       store.BotStore
-	messages   store.MessageStore
-	blocker    blockChecker
-	channels   publicChannelUsernameResolver
-	stickers   stickerSetCreator
-	installer  userStickerSetInstaller
-	aiChat     aiChatGenerator
-	premium    premiumStorefront
-	gifCatalog interface {
+	users          store.UserStore
+	bots           store.BotStore
+	messages       store.MessageStore
+	blocker        blockChecker
+	channels       publicChannelUsernameResolver
+	stickers       stickerSetCreator
+	installer      userStickerSetInstaller
+	agentCallbacks chatBotCallbackForwarder
+	premium        premiumStorefront
+	gifCatalog     interface {
 		ListGifCatalog(context.Context, bool) ([]domain.GifCatalogEntry, error)
 		GetDocuments(context.Context, []int64) ([]domain.Document, error)
 	}
-	verification          verificationApplications
-	customVerification    customVerifications
-	verifierTargets       verifierBotTargets
-	telegramLogin         *telegramloginapp.Service
-	hooks                 RouterHooks
-	textDrafts            TextDraftPusher
-	userCache             store.UserCache
-	cache                 *botProfileCache
-	log                   *zap.Logger
-	now                   func() time.Time
-	chatBotStreamThrottle time.Duration
-	publicBaseURL         string
-	gramsrvOperators      map[int64]bool
-	gramsrvFreezes        gramsrvAccountFreezeManager
-	donations             donationsSource
-	gramsrvAdmin          gramsrvFreezeAdmin
-	gramsrvAdminChatIDs   map[int64]struct{}
+	verification        verificationApplications
+	customVerification  customVerifications
+	verifierTargets     verifierBotTargets
+	telegramLogin       *telegramloginapp.Service
+	hooks               RouterHooks
+	userCache           store.UserCache
+	cache               *botProfileCache
+	log                 *zap.Logger
+	now                 func() time.Time
+	publicBaseURL       string
+	gramsrvOperators    map[int64]bool
+	gramsrvFreezes      gramsrvAccountFreezeManager
+	donations           donationsSource
+	gramsrvAdmin        gramsrvFreezeAdmin
+	gramsrvAdminChatIDs map[int64]struct{}
 	// dialogLimiter bounds how often one applicant can drive a service-bot dialog.
 	// The verification service already rate-limits application creation; this is the
 	// separate bound on dialog traffic itself, so a script cannot spin the state
@@ -249,15 +240,6 @@ func (s *Service) SetDonationsSource(src donationsSource) {
 	s.donations = src
 }
 
-// WithAIChatGenerator 注入内置 @ChatBot 使用的 AI 文本生成器。
-func WithAIChatGenerator(g aiChatGenerator) Option {
-	return func(s *Service) {
-		if g != nil {
-			s.aiChat = g
-		}
-	}
-}
-
 // WithPremium injects the Premium catalog/status service used by @premiumbot.
 func WithPremium(p premiumStorefront) Option {
 	return func(s *Service) {
@@ -336,15 +318,6 @@ func WithTelegramLogin(login *telegramloginapp.Service) Option {
 	}
 }
 
-// WithAIChatStreamThrottle 调整 @ChatBot 流式草稿推送的最小时间间隔（测试用）。
-func WithAIChatStreamThrottle(d time.Duration) Option {
-	return func(s *Service) {
-		if d >= 0 {
-			s.chatBotStreamThrottle = d
-		}
-	}
-}
-
 func WithPublicBaseURL(baseURL string) Option {
 	return func(s *Service) {
 		s.publicBaseURL = links.NormalizeBaseURL(baseURL)
@@ -398,17 +371,14 @@ func (s *Service) SetRouterHooks(h RouterHooks) {
 	}
 }
 
-// SetTextDraftPusher 注入 @ChatBot 流式草稿推送边界。
-func (s *Service) SetTextDraftPusher(p TextDraftPusher) {
+func (s *Service) SetAgentBotCallbackForwarder(forwarder chatBotCallbackForwarder) {
 	if s != nil {
-		s.textDrafts = p
+		s.agentCallbacks = forwarder
 	}
 }
 
-func (s *Service) SetAIChatGenerator(g aiChatGenerator) {
-	if s != nil {
-		s.aiChat = g
-	}
+func (s *Service) SetChatBotCallbackForwarder(forwarder chatBotCallbackForwarder) {
+	s.SetAgentBotCallbackForwarder(forwarder)
 }
 
 // SetPremium injects the Premium storefront after construction when startup
@@ -449,14 +419,13 @@ func (s *Service) SetVerifierTargets(t verifierBotTargets) {
 // NewService 创建 bots 服务。
 func NewService(users store.UserStore, bots store.BotStore, messages store.MessageStore, opts ...Option) *Service {
 	s := &Service{
-		users:                 users,
-		bots:                  bots,
-		messages:              messages,
-		cache:                 newBotProfileCache(botProfileCacheMaxEntries, botProfileCacheTTL),
-		log:                   zap.NewNop(),
-		now:                   time.Now,
-		chatBotStreamThrottle: defaultChatBotStreamThrottle,
-		publicBaseURL:         links.DefaultPublicBaseURL,
+		users:         users,
+		bots:          bots,
+		messages:      messages,
+		cache:         newBotProfileCache(botProfileCacheMaxEntries, botProfileCacheTTL),
+		log:           zap.NewNop(),
+		now:           time.Now,
+		publicBaseURL: links.DefaultPublicBaseURL,
 	}
 	for _, opt := range opts {
 		opt(s)

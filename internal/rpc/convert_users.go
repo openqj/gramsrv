@@ -433,6 +433,9 @@ func addUsers(out *tg.UpdatesDifference, seen map[int64]struct{}, viewerUserID i
 		if u.ID == 0 {
 			continue
 		}
+		if domain.IsAgentCompatibilityPeerID(u.ID) {
+			continue
+		}
 		if _, ok := seen[u.ID]; ok {
 			continue
 		}
@@ -456,6 +459,10 @@ func addMessageUsers(out *tg.UpdatesDifference, seen map[int64]struct{}, msg dom
 			continue
 		}
 		seen[peer.ID] = struct{}{}
+		if domain.IsAgentCompatibilityPeerID(peer.ID) {
+			out.Users = append(out.Users, &tg.UserEmpty{ID: peer.ID})
+			continue
+		}
 		if u, ok := domain.SystemUserByID(peer.ID); ok {
 			out.Users = append(out.Users, tgUser(u))
 		}

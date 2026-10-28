@@ -6,17 +6,19 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
+	"telesrv/internal/domain"
 	"telesrv/internal/store"
 	"telesrv/internal/store/postgres/sqlcgen"
 )
 
 // MessageStore 用 PostgreSQL 实现 store.MessageStore。
 type MessageStore struct {
-	db               sqlcgen.DBTX
-	q                *sqlcgen.Queries
-	boxIDs           store.BoxIDAllocator
-	privateSendLanes *userLaneActor
-	log              *zap.Logger
+	db                      sqlcgen.DBTX
+	q                       *sqlcgen.Queries
+	boxIDs                  store.BoxIDAllocator
+	privateSendLanes        *userLaneActor
+	log                     *zap.Logger
+	agentGatewayInboundHook func(context.Context, pgx.Tx, domain.AgentGatewayInbound) error
 }
 
 type txBeginner interface {
@@ -37,6 +39,16 @@ func WithMessageAllocators(boxIDs store.BoxIDAllocator) MessageStoreOption {
 func WithMessageLogger(log *zap.Logger) MessageStoreOption {
 	return func(s *MessageStore) {
 		s.log = log
+	}
+}
+
+// WithAgentGatewayInboundHook persists owner-authenticated Agent Bot text in
+// the Gateway ingress outbox inside the same transaction as both
+// private-message projections. Other private messages remain on the ordinary
+// hot path.
+func WithAgentGatewayInboundHook(hook func(context.Context, pgx.Tx, domain.AgentGatewayInbound) error) MessageStoreOption {
+	return func(s *MessageStore) {
+		s.agentGatewayInboundHook = hook
 	}
 }
 

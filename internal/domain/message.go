@@ -320,17 +320,35 @@ type MessageFilter struct {
 type SendPrivateTextRequest struct {
 	SenderUserID    int64
 	RecipientUserID int64
-	RandomID        int64
-	Message         string
-	Entities        []MessageEntity
-	Media           *MessageMedia
-	Silent          bool
-	NoForwards      bool
-	ReplyTo         *MessageReply
-	Forward         *MessageForward
-	Date            int
-	OriginAuthKeyID [8]byte
-	OriginSessionID int64
+	// AgentGatewayBotOwnerUserID is set only by the authenticated RPC edge after
+	// resolving the recipient's persisted BotProfile. Stores never infer it from
+	// Telegram-provided message content.
+	AgentGatewayBotOwnerUserID int64
+	AgentGatewayBotUsername    string
+	// Agent conversation fields bind the standard message box to an
+	// owner-scoped private Agent session. The peer ID is an MTProto compatibility
+	// handle only; it must not be backed by a synthetic users row.
+	AgentConversationPeerID int64
+	AgentSessionID          string
+	AgentTaskID             string
+	AgentEventID            string
+	AgentRole               string
+	AgentEventType          string
+	AgentStatus             string
+	AgentEventVersion       int64
+	AgentPayload            []byte
+	AgentIncoming           bool
+	RandomID                int64
+	Message                 string
+	Entities                []MessageEntity
+	Media                   *MessageMedia
+	Silent                  bool
+	NoForwards              bool
+	ReplyTo                 *MessageReply
+	Forward                 *MessageForward
+	Date                    int
+	OriginAuthKeyID         [8]byte
+	OriginSessionID         int64
 	// OriginClientSession carries the exact request's initConnection language
 	// into an in-process bot responder. Stores and idempotency fingerprints
 	// intentionally ignore this ephemeral metadata.
